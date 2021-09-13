@@ -1,0 +1,153 @@
+#this is the workflow for tximport and DESeq2 to detect the effect of L1L2 and dexamethasone in BECs
+R.version
+#4.0.2
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+#BiocManager::install("refGenome")
+#install.packages('refGenome')
+#install.packages('tximeta')
+BiocManager::install("tximport")
+# a and yes
+BiocManager::install('GenomicFeatures')
+# a and yes
+BiocManager::install('DESeq2')
+
+BiocManager::install('DelayedArray')
+
+library(tximport)
+library(tidyverse)
+library(GenomicFeatures)
+library(DelayedArray) 
+library(DESeq2)
+library(magrittr)
+
+getwd()
+
+#need to make sure the files are in the same folder as where you're working for this next bit to work
+sample_names <- list.files()
+#want to convert data type to a matrix from 2D...use the function as. for it to happen
+sample_names <- as.data.frame(sample_names)
+sample_names <- sample_names[1:20,]
+#put a comma to let it know its a dataframe(table) (not a list)
+sample_names
+
+
+#lOAD METADTA CSV (that we made) - my column names are treatment_for_df, donor_for_df, condition_for_df, sample, quant_file
+samples <- read.csv("~/OneDrive - King's College London/PhD- 1st Year/Polyribosome fractionation primary cells/New analysis Aug 20/poly_DEXcomparison_quant_files/poly_KD_DEX_metadata.csv")
+
+# Make txdb object from GFF file
+txdb <- makeTxDbFromGFF("~/OneDrive - King's College London/PhD- 1st Year/Polyribosome fractionation primary cells/New analysis Aug 20/poly_DEXcomparison_quant_files/gencode.v34.annotation.gtf", 
+                        format = "gtf")
+
+saveDb(txdb, file="gencode.v34.sqlite")
+
+# next time you can just load with this line (no need to makeTxDb...)
+# txdb <- loadDb("gencode.v34.sqlite")
+
+txdb <- loadDb("gencode.v34.sqlite")
+
+# select the columns that we need now
+columns(txdb)
+k <- keys(txdb, "GENEID")
+tx2gene <- select(txdb, keys = k, keytype = 'GENEID', columns = 'TXNAME')
+
+#or #https://sbc.shef.ac.uk/workshops/2020-02-13-rnaseq-r/rna-seq-preprocessing.nb.html
+#Important, TXNAME has to be the first column
+res <- AnnotationDbi::select(txdb, k, "TXNAME", "GENEID")
+tx2gene <- res[,2:1]
+head(tx2gene)
+write.csv(tx2gene, file='tx2gene.csv', row.names = FALSE, quote = FALSE )
+
+#use tximport to read our count files. Since we are using the same gtf file, the versions of the transcripts will be the same, hence the argument ignoreTxVersion = FALSE. If not, we set it to TRUE
+txi <- tximport(files = samples$quant_file, type = 'salmon', tx2gene = tx2gene, ignoreTxVersion = FALSE)
+summary(txi)
+head(txi$counts)
+
+# we set the column names to the sample names using our samples object
+colnames(txi$counts) <- samples$sample
+head(txi$counts)
+
+
+# we now import the txi object into DESeq (~ tells DESEQ what to compare)
+#design considers the effect of condition, treatment, and then the interaction b/w condition with treatment
+dds <- DESeqDataSetFromTximport(txi = txi, 
+                                colData = samples, 
+                                design = ~treatment_for_df)
+
+
+vsd <- vst(dds, blind=FALSE)
+plotPCA(vsd, c("treatment_for_df"))
+#saved image in folder plots, PCA_total_donors
+
+id.levels <- c("213", "0941p2", "0941p3", "1314", "1514")
+id.levels
+
+dds$donor_for_df %<>% factor(levels=id.levels)
+o <- order(dds$treatment_for_df, dds$donor_for_df)
+dds <- dds[,o]
+
+as.data.frame(colData(dds)[c("treatment_for_df","donor_for_df")])
+
+all(dds$donor_for_df == c(rep(id.levels[1:5], 2),
+                          rep(id.levels[6:10], 2)))
+
+#to consider the donor when looking at DEGs, you have to make it nested... 
+#+condition:id.nested. assign id.nested to the column donor_for_df
+
+#Michael Love Github To make the within-individual treatment comparisons across 
+#condition, we need to do a little re-coding trick for the 
+#subject ID. We will re-code them so that the first asthmatic 
+#subject is called `1`, and the first non-asthmatic subject is also called `1`, which we call "nesting". 
+
+#Note that these two subjects will not be treated as the same in the model, because we will
+#include an interaction term between `condition` and `id.nested`.
+
+dds$id.nested <- factor(rep(1:5,2))
+as.data.frame(colData(dds)[c("treatment_for_df",
+                             "donor_for_df","id.nested")])
+
+#Now we update the design, so that each patient gets his or her own reference level for comparison of the treatment effect:
+
+design(dds) <- ~treatment_for_df 
+
+#to fix the enslmb annotations (incl. only the first 15 characters ignoring the versions)
+head(rownames(dds))
+table(duplicated(substr(rownames(dds),1,15)))
+rownames(dds) <- make.unique(substr(rownames(dds),1,15))
+
+###end of his github
+
+dim(dds)
+
+#Now we can run our differential expression pipeline. First, it is sometimes convenient to remove genes where all the samples have very small counts. It's less of an issue for the statistical methods, and mostly just wasted computation, as it is not possible for these genes to exhibit statistical significance for differential expression. Here we count how many genes (out of those with at least a single count) have 3 samples with a count of 10 or more:
+dds <- dds[rowSums(counts(dds)) > 0,]
+keep <- rowSums(counts(dds) >= 10) >= 3
+table(keep)
+# filter them out of dds matrix to make it 17336, need to make it an object otherwise it DeSeqs the whole list 
+dds[keep, ]
+
+dds <- dds[keep, ]
+
+#The first thing we notice is that both our counts and average transcript length were used to construct the DESeq object. We also see a warning message, where our condition was converted to a factor. Both of these messages are ok to see!
+
+# now we do differential gene expression
+
+dds <- DESeq(dds)
+
+resultsNames(dds)
+
+res <- results(dds, contrast = c("treatment_for_df","DEX","noDEX"),name="treatment_for_df_DEX_vs_noDEX")
+res.sort <- res[order(res$pvalue),]
+res.sort 
+
+summary(res)
+write.csv(res, "results_knockdown_DEXcomparison_poly.csv")
+head(res)
+
+# Plotting
+
+plotMA(res, ylim=c(-5,5))
+
+
+
