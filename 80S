@@ -1,0 +1,25 @@
+# filter them out of dds matrix to make it 17336, need to make it an object otherwise it DeSeqs the whole list 
+dds[keep, ]
+dds <- dds[keep, ]
+
+#The first thing we notice is that both our counts and average transcript length were used to construct the DESeq object. We also see a warning message, where our condition was converted to a factor. Both of these messages are ok to see!
+
+# now we do differential gene expression
+
+dds <- DESeq(dds)
+
+resultsNames(dds)
+
+#to compare DEX over noDEX (rather than the other way round) add contrast to results function 
+res <- results(dds, contrast = c("treatment_for_df", "DEX", "noDEX"), name="treatment_for_df_DEX_vs_noDEX")
+res.sort <- res[order(res$pvalue),]
+res.sort 
+
+summary(res)
+write.csv(res, "results_KD_DEXcomparison_outlier_80S.csv")
+head(res)
+
+# Plotting
+
+plotMA(res, ylim=c(-5,5))
+
